@@ -30,7 +30,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---- Helpers (kept minimal) ----
-def load_csv(path="_recipessample.csv"):
+def load_csv(path="food_recipes.csv"):
     if not os.path.exists(path):
         st.error(f"Dataset not found: {path}. Place the CSV next to this script.")
         st.stop()
