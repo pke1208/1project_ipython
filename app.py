@@ -200,63 +200,82 @@ def load_recipes_from_path(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
     return df
 
-def load_dataset(uploaded_file) -> pd.DataFrame:
-    # uploaded_file is a file-like object from st.file_uploader or None; fallback to 'food_recipes.csv' in cwd
-    if uploaded_file is not None:
+def parse_minutes(s: Any) -> float:
+    if pd.isna(s):
+        return float('nan')
+    t = str(s).strip()
+    if not t:
+        return float('nan')
+    t = t.replace("–", "-")
+    # try hours and minutes
+    hours = 0
+    minutes = 0
+    h_matches = re.findall(r'(\d+)\s*[hH]', t)
+    m_matches = re.findall(r'(\d+)\s*[mM]', t)
+    if h_matches:
+        hours = sum(int(x) for x in h_matches)
+    if m_matches:
+        minutes = sum(int(x) for x in m_matches)
+    if h_matches or m_matches:
+        return hours * 60 + minutes
+    # fallback: extract first number (assume minutes)
+    num = re.search(r'(\d+)', t)
+    if num:
+        return float(num.group(1))
+    return float('nan')
+
+@st.cache_data(ttl=300)
+def load_dataset(fallback_path: str = "food_recipes.csv") -> pd.DataFrame:
+    if os.path.exists(fallback_path):
         try:
-            # uploaded_file is a BytesIO-like; pd.read_csv can read it directly
-            df = pd.read_csv(uploaded_file)
+            df = load_recipes_from_path(fallback_path)
         except Exception as e:
-            st.error(f"Could not read uploaded CSV: {e}")
+            st.error(f"Error reading dataset at {fallback_path}: {e}")
             st.stop()
     else:
-        # fallback file name the app expects
-        fallback = "food_recipes.csv"
-        if os.path.exists(fallback):
-            try:
-                df = load_recipes_from_path(fallback)
-            except Exception as e:
-                st.error(f"Error reading {fallback}: {e}")
-                st.stop()
-        else:
-            st.error("No dataset provided. Upload a CSV in the sidebar or place food_recipes.csv in the app folder.")
-            st.stop()
-    # Validate and normalize columns
-    expected = ['name', 'description', 'course', 'diet', 'prep_time', 'cook_time', 'ingredients', 'instructions']
-    if not all(col in df.columns for col in expected):
-        st.warning(f"CSV doesn't contain all expected columns. Required: {expected}. I will try to continue with available columns.")
-    # Coerce times to numeric where possible
+        st.error(f"Dataset not found: {fallback_path}. Please ensure the sample CSV is in the app folder as '{fallback_path}'.")
+        st.stop()
+
+    # Map known alternate column names from sample to the app's expected names
+    # Many sample files use 'recipe_title' for name
+    if 'recipe_title' in df.columns and 'name' not in df.columns:
+        df['name'] = df['recipe_title']
+    # keep description if available
+    if 'description' not in df.columns:
+        df['description'] = ""
+    # course/diet columns
+    if 'course' not in df.columns:
+        df['course'] = ""
+    if 'diet' not in df.columns:
+        df['diet'] = ""
+    # times - try to parse flexible time strings like "15 M" or "1 H 30 M"
     if 'prep_time' in df.columns:
-        df['prep_time'] = pd.to_numeric(df['prep_time'], errors='coerce')
+        df['prep_time'] = df['prep_time'].apply(parse_minutes)
     else:
         df['prep_time'] = pd.NA
     if 'cook_time' in df.columns:
-        df['cook_time'] = pd.to_numeric(df['cook_time'], errors='coerce')
+        df['cook_time'] = df['cook_time'].apply(parse_minutes)
     else:
         df['cook_time'] = pd.NA
-    # Ensure string columns
-    for c in ['name', 'description', 'course', 'diet', 'ingredients', 'instructions']:
-        if c in df.columns:
-            df[c] = df[c].astype(str)
-        else:
-            df[c] = ""
-    # parse ingredients into list (new column)
+    # Ensure ingredients and instructions exist
+    if 'ingredients' not in df.columns:
+        df['ingredients'] = ""
+    if 'instructions' not in df.columns:
+        df['instructions'] = ""
+    # parse ingredients into list
     df['parsed_ingredients'] = df['ingredients'].apply(parse_ingredients_cell)
-    # Normalize course/diet for dropdown consistency
-    df['course_norm'] = df['course'].str.strip().replace('', pd.NA)
-    df['diet_norm'] = df['diet'].str.strip().replace('', pd.NA)
+    df['course_norm'] = df['course'].astype(str).str.strip().replace('', pd.NA)
+    df['diet_norm'] = df['diet'].astype(str).str.strip().replace('', pd.NA)
     return df
 
+# ---- Load the dataset once (no upload required) ----
+df = load_dataset()
+
 # ---- Sidebar & Main UI ----
-# Use markdown (unsafe_allow_html) instead of st.title with unsafe flag
 st.markdown('<h1 class="main-title">🍳 Smart Recipe Finder</h1>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Tell me what you have, and I’ll suggest recipes that fit your preferences.</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">Tell me what you have, choose a course & diet, and I’ll suggest recipes from the bundled dataset.</div>', unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("Load dataset")
-    uploaded = st.file_uploader("Upload recipe CSV (optional)", type=["csv"])
-    use_sample_button = st.checkbox("If no CSV, try to use food_recipes.csv in folder", value=True)
-    st.markdown("---")
     st.header("Your pantry & preferences")
     ing_text = st.text_area("Ingredients you have (comma or newline separated). Optional ':qty' after item", value="eggs:2\nmilk\nonion", help="Example: eggs:2, milk, flour")
     pantry = parse_pantry_text(ing_text)
@@ -279,28 +298,29 @@ with st.sidebar:
 if fuzz is None:
     st.warning("fuzzywuzzy not available. Install 'fuzzywuzzy' (and 'python-levenshtein' for speed) for improved string matching: pip install fuzzywuzzy python-levenshtein")
 
-if find_btn:
-    # Pass uploaded (file-like) or None; loader will use fallback file if present
-    df = load_dataset(uploaded if uploaded is not None else None)
-    courses = sorted([c for c in df['course_norm'].dropna().unique()]) if 'course_norm' in df.columns else []
-    diets = sorted([d for d in df['diet_norm'].dropna().unique()]) if 'diet_norm' in df.columns else []
-    col_c1, col_c2 = st.columns(2)
-    with col_c1:
-        selected_course = st.selectbox("Course", options=["Any"] + courses, index=0)
-    with col_c2:
-        selected_diet = st.selectbox("Diet", options=["Any"] + diets, index=0)
-    # Time filters with safe defaults
-    min_prep = int(df['prep_time'].dropna().min()) if df['prep_time'].dropna().size else 0
-    max_prep_avail = int(df['prep_time'].dropna().max()) if df['prep_time'].dropna().size else 120
-    min_cook = int(df['cook_time'].dropna().min()) if df['cook_time'].dropna().size else 0
-    max_cook_avail = int(df['cook_time'].dropna().max()) if df['cook_time'].dropna().size else 240
-    col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        max_prep_allowed = st.number_input("Max prep time (minutes)", min_value=0, max_value=max(240, max_prep_avail), value=max(30, min_prep))
-    with col_t2:
-        max_cook_allowed = st.number_input("Max cook time (minutes)", min_value=0, max_value=max(1440, max_cook_avail), value=max(60, min_cook))
-    st.markdown("---")
+# Course & Diet selectors using dataset values
+courses = sorted([c for c in df['course_norm'].dropna().unique()]) if 'course_norm' in df.columns else []
+diets = sorted([d for d in df['diet_norm'].dropna().unique()]) if 'diet_norm' in df.columns else []
+col_c1, col_c2 = st.columns(2)
+with col_c1:
+    selected_course = st.selectbox("Course", options=["Any"] + courses, index=0)
+with col_c2:
+    selected_diet = st.selectbox("Diet", options=["Any"] + diets, index=0)
 
+# Time filters with safe defaults derived from dataset
+min_prep = int(df['prep_time'].dropna().min()) if df['prep_time'].dropna().size else 0
+max_prep_avail = int(df['prep_time'].dropna().max()) if df['prep_time'].dropna().size else 120
+min_cook = int(df['cook_time'].dropna().min()) if df['cook_time'].dropna().size else 0
+max_cook_avail = int(df['cook_time'].dropna().max()) if df['cook_time'].dropna().size else 240
+col_t1, col_t2 = st.columns(2)
+with col_t1:
+    max_prep_allowed = st.number_input("Max prep time (minutes)", min_value=0, max_value=max(240, max_prep_avail), value=max(30, min_prep))
+with col_t2:
+    max_cook_allowed = st.number_input("Max cook time (minutes)", min_value=0, max_value=max(1440, max_cook_avail), value=max(60, min_cook))
+st.markdown("---")
+
+# Main search/run logic
+if find_btn:
     filtered = df.copy()
     if selected_course != "Any":
         filtered = filtered[filtered['course_norm'].str.lower() == selected_course.lower()]
@@ -312,12 +332,13 @@ if find_btn:
         st.info("No recipes match your course/diet/time filters. Try relaxing some constraints.")
     else:
         results = []
+        price_map = parse_price_map(st.session_state.get("price_map_text", ""))
         for _, row in filtered.iterrows():
             ingredients = row.get('parsed_ingredients', []) or []
             missing_count, missing_list, coverage = score_recipe(ingredients, pantry, fuzz_threshold=fuzz_threshold)
-            est_cost = estimate_missing_cost(missing_list, parse_price_map(st.session_state.get("price_map_text", "")))
+            est_cost = estimate_missing_cost(missing_list, price_map)
             results.append({
-                "name": row.get('name', ''),
+                "name": row.get('name', '') or row.get('recipe_title', ''),
                 "description": row.get('description', ''),
                 "course": row.get('course', ''),
                 "diet": row.get('diet', ''),
@@ -373,11 +394,6 @@ if find_btn:
                             for idx_step, step in enumerate(steps, 1):
                                 if step.strip():
                                     st.write(f"{idx_step}. {step.strip()}")
-                    if st.button(f"Add '{r['name']}' to wishlist", key=f"wish_{i}"):
-                        if "wishlist" not in st.session_state:
-                            st.session_state.wishlist = []
-                        st.session_state.wishlist.append(r)
-                        st.success("Added to wishlist (missing ingredients aggregated in sidebar).")
 
 # ---- Sidebar wishlist display & download ----
 st.sidebar.markdown("---")
