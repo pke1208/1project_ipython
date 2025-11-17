@@ -178,7 +178,7 @@ def load_recipes_from_path(path: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 @st.cache_data(ttl=300)
-def load_dataset(fallback_path: str = "food_recipessample.csv") -> pd.DataFrame:
+def load_dataset(fallback_path: str = "food_recipes.csv") -> pd.DataFrame:
     if not os.path.exists(fallback_path):
         st.error(f"Dataset not found: {fallback_path}. Please add the CSV to the app folder.")
         st.stop()
