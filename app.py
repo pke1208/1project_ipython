@@ -15,7 +15,7 @@ st.markdown("""  # inject small CSS to style ingredient labels
 """, unsafe_allow_html=True)  # allow raw HTML/CSS in markdown
 
 # ---- Helpers (kept minimal) ----
-def load_csv(path="food_recipessample.csv"):  # function to load the bundled CSV
+def load_csv(path="food_recipes.csv"):  # function to load the bundled CSV
     if not os.path.exists(path):  # check file exists
         st.error(f"Dataset not found: {path}. Place the CSV next to this script.")  # show error in UI
         st.stop()  # stop execution if dataset missing
