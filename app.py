@@ -1,9 +1,9 @@
+
 from typing import List, Dict, Any, Tuple
 import re
 import os
 import math
 import io
-import csv
 
 import streamlit as st
 import pandas as pd
@@ -11,7 +11,7 @@ import pandas as pd
 # fuzzywuzzy may be slower without python-levenshtein; try to import and warn
 try:
     from fuzzywuzzy import fuzz
-except Exception as e:
+except Exception:
     fuzz = None
 
 st.set_page_config(page_title="Smart Recipe Finder", page_icon="🍳", layout="wide")
@@ -51,12 +51,7 @@ def strip_parentheses(text: str) -> str:
     return re.sub(r'\([^)]*\)', '', text)
 
 def remove_leading_qty_unit(text: str) -> str:
-    """
-    Heuristically remove leading quantities and common unit words.
-    E.g. "1 1/2 cups chopped onion" -> "chopped onion" -> further cleaned later
-    """
     t = text.strip()
-    # remove fractions & numbers at the start
     t = re.sub(r'^[\d\.\-\/\s]+', '', t)
     parts = t.split()
     i = 0
@@ -69,7 +64,6 @@ def remove_leading_qty_unit(text: str) -> str:
     return ' '.join(parts[i:]).strip()
 
 def parse_ingredients_cell(cell: Any) -> List[str]:
-    """Parse a recipe 'ingredients' field into normalized ingredient names (no qtys)."""
     if pd.isna(cell):
         return []
     if isinstance(cell, (list, tuple)):
@@ -83,12 +77,10 @@ def parse_ingredients_cell(cell: Any) -> List[str]:
             continue
         tok = strip_parentheses(tok)
         tok = remove_leading_qty_unit(tok)
-        # remove common adjectives at start
         tok = re.sub(r'^(chopped|diced|minced|sliced|fresh|grated|shredded|room temperature)\s+', '', tok, flags=re.I)
         cleaned = normalize(tok)
         if cleaned:
             out.append(cleaned)
-    # dedupe preserving order
     seen = set()
     res = []
     for i in out:
@@ -98,20 +90,13 @@ def parse_ingredients_cell(cell: Any) -> List[str]:
     return res
 
 def parse_pantry_text(pantry_text: str) -> Dict[str, float]:
-    """
-    Parse pantry input lines into mapping item -> qty (float).
-    If qty omitted, use math.inf to indicate present (unknown qty).
-    Accept: "eggs:6" or "flour" per line or comma-separated single-line input.
-    """
     pantry: Dict[str, float] = {}
     if not pantry_text:
         return pantry
-    # allow comma-separated single-line too
     lines = []
     if '\n' in pantry_text:
         lines = pantry_text.splitlines()
     else:
-        # split by comma if there's no newline
         lines = re.split(r',\s*', pantry_text)
     for line in lines:
         line = line.strip()
@@ -130,13 +115,9 @@ def parse_pantry_text(pantry_text: str) -> Dict[str, float]:
     return pantry
 
 def ingredient_present(ing: str, pantry: Dict[str, float], fuzz_threshold: int = 80) -> bool:
-    """
-    Heuristic presence check: True if exact match or fuzzy token overlap.
-    """
     ing_n = normalize(ing)
     if ing_n in pantry:
         return True
-    # tokenized check: e.g., pantry has "tomato", ing "cherry tomato" -> match
     ing_tokens = set(ing_n.split())
     for p in pantry.keys():
         p_n = normalize(p)
@@ -144,12 +125,13 @@ def ingredient_present(ing: str, pantry: Dict[str, float], fuzz_threshold: int =
             return True
         if p_n in ing_n or ing_n in p_n:
             return True
-        # fuzzy comparison on whole ingredient strings if fuzz available
         if fuzz:
-            score = fuzz.ratio(ing_n, p_n)
-            if score >= fuzz_threshold:
-                return True
-        # token overlap heuristic (>50% tokens)
+            try:
+                score = fuzz.ratio(ing_n, p_n)
+                if score >= fuzz_threshold:
+                    return True
+            except Exception:
+                pass
         p_tokens = set(p_n.split())
         if ing_tokens & p_tokens:
             if len(ing_tokens & p_tokens) / max(1, len(ing_tokens)) >= 0.5:
@@ -157,11 +139,6 @@ def ingredient_present(ing: str, pantry: Dict[str, float], fuzz_threshold: int =
     return False
 
 def score_recipe(ingredients: List[str], pantry: Dict[str, float], fuzz_threshold: int) -> Tuple[int, List[str], float]:
-    """
-    Return (missing_count, missing_list, coverage_fraction)
-    coverage_fraction = matched_user_ingredients / total_recipe_ingredients
-    Note: coverage is relative to recipe size so small recipes don't unfairly dominate.
-    """
     missing = []
     matched = 0
     for ing in ingredients:
@@ -174,13 +151,6 @@ def score_recipe(ingredients: List[str], pantry: Dict[str, float], fuzz_threshol
     return len(missing), missing, coverage
 
 def parse_price_map(text: str) -> Dict[str, float]:
-    """
-    Parse user-provided per-ingredient prices from textarea:
-    e.g.
-      tomato:0.6
-      eggs:0.3
-    Returns map normalized item -> price-per-unit (float)
-    """
     price_map = {}
     if not text:
         return price_map
@@ -195,12 +165,10 @@ def parse_price_map(text: str) -> Dict[str, float]:
     return price_map
 
 def estimate_missing_cost(missing: List[str], price_map: Dict[str, float]) -> float:
-    """Sum price_map for missing ingredients where available."""
     total = 0.0
     for ing in missing:
         p = price_map.get(ing)
         if p is None:
-            # try token matching in price_map keys
             for k in price_map.keys():
                 if k in ing or ing in k:
                     p = price_map[k]
@@ -210,10 +178,6 @@ def estimate_missing_cost(missing: List[str], price_map: Dict[str, float]) -> fl
     return round(total, 2)
 
 def aggregate_wishlist(selected: List[Dict[str, Any]], price_map: Dict[str, float]) -> List[Dict[str, Any]]:
-    """
-    Build aggregated wishlist from selected recipes' missing lists.
-    Count frequency and estimate cost (per-item price from price_map).
-    """
     agg = {}
     for r in selected:
         for ing in r.get("missing", []):
@@ -222,7 +186,6 @@ def aggregate_wishlist(selected: List[Dict[str, Any]], price_map: Dict[str, floa
     for k, v in sorted(agg.items(), key=lambda x: -x[1]):
         price = price_map.get(k)
         if price is None:
-            # try token match
             for pk in price_map.keys():
                 if pk in k or k in pk:
                     price = price_map[pk]
@@ -233,26 +196,30 @@ def aggregate_wishlist(selected: List[Dict[str, Any]], price_map: Dict[str, floa
 # ---- Load dataset ----
 @st.cache_data(ttl=300)
 def load_recipes_from_path(path: str) -> pd.DataFrame:
-    df = pd.read_csv("food_recipes")
+    # read the CSV path provided
+    df = pd.read_csv(path)
     return df
 
 def load_dataset(uploaded_file) -> pd.DataFrame:
-    # uploaded_file is BytesIO or None; fallback to 'recipes.csv' in cwd
+    # uploaded_file is a file-like object from st.file_uploader or None; fallback to 'food_recipes.csv' in cwd
     if uploaded_file is not None:
         try:
-            df = pd.read_csv("food_recipes")
+            # uploaded_file is a BytesIO-like; pd.read_csv can read it directly
+            df = pd.read_csv(uploaded_file)
         except Exception as e:
             st.error(f"Could not read uploaded CSV: {e}")
             st.stop()
     else:
-        if os.path.exists("food_recipes.csv"):
+        # fallback file name the app expects
+        fallback = "food_recipes.csv"
+        if os.path.exists(fallback):
             try:
-                df = load_recipes_from_path("food_recipes.csv")
+                df = load_recipes_from_path(fallback)
             except Exception as e:
-                st.error(f"Error reading recipes.csv: {e}")
+                st.error(f"Error reading {fallback}: {e}")
                 st.stop()
         else:
-            st.error("No dataset provided. Upload a CSV in the sidebar or place recipes.csv in the app folder.")
+            st.error("No dataset provided. Upload a CSV in the sidebar or place food_recipes.csv in the app folder.")
             st.stop()
     # Validate and normalize columns
     expected = ['name', 'description', 'course', 'diet', 'prep_time', 'cook_time', 'ingredients', 'instructions']
@@ -280,22 +247,21 @@ def load_dataset(uploaded_file) -> pd.DataFrame:
     df['diet_norm'] = df['diet'].str.strip().replace('', pd.NA)
     return df
 
-# ---- Sidebar: inputs ----
-st.title('<span class="main-title">🍳 Smart Recipe Finder</span>', unsafe_allow_html=True)
+# ---- Sidebar & Main UI ----
+# Use markdown (unsafe_allow_html) instead of st.title with unsafe flag
+st.markdown('<h1 class="main-title">🍳 Smart Recipe Finder</h1>', unsafe_allow_html=True)
 st.markdown('<div class="subtitle">Tell me what you have, and I’ll suggest recipes that fit your preferences.</div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("Load dataset")
     uploaded = st.file_uploader("Upload recipe CSV (optional)", type=["csv"])
-    use_sample_button = st.checkbox("If no CSV, try to use recipes.csv in folder", value=True)
+    use_sample_button = st.checkbox("If no CSV, try to use food_recipes.csv in folder", value=True)
     st.markdown("---")
     st.header("Your pantry & preferences")
     ing_text = st.text_area("Ingredients you have (comma or newline separated). Optional ':qty' after item", value="eggs:2\nmilk\nonion", help="Example: eggs:2, milk, flour")
     pantry = parse_pantry_text(ing_text)
     st.write(f"Detected pantry items: {', '.join(sorted(pantry.keys()))}" if pantry else "No pantry items parsed yet.")
     st.markdown("---")
-    # Additional inputs requested: course, diet, prep & cook times
-    # We'll load dataset after "Find recipes" is clicked, so for dropdowns we compute later.
     st.markdown("Filter & matching options")
     fuzz_threshold = st.slider("Fuzzy matching sensitivity (higher = stricter)", 60, 100, 80)
     min_coverage = st.slider("Minimum recipe ingredient coverage required (%)", 0, 100, 0)
@@ -310,23 +276,20 @@ with st.sidebar:
     st.markdown("---")
     st.write("Tips: adjust fuzzy sensitivity if ingredient names differ (e.g., 'parmesan' vs 'parmigiano').")
 
-# ---- Main logic ----
-# If fuzzywuzzy missing, show friendly warning (but app can still run with token overlap heuristics)
 if fuzz is None:
     st.warning("fuzzywuzzy not available. Install 'fuzzywuzzy' (and 'python-levenshtein' for speed) for improved string matching: pip install fuzzywuzzy python-levenshtein")
 
 if find_btn:
-    df = load_dataset(uploaded if uploaded is not None else ( "recipes.csv" if use_sample_button and os.path.exists("recipes.csv") else None ))
-    # Build course/diet options based on dataset
-    courses = sorted([c for c in df['course_norm'].dropna().unique()])
-    diets = sorted([d for d in df['diet_norm'].dropna().unique()])
-    # UI selects for course/diet now that we have dataset
+    # Pass uploaded (file-like) or None; loader will use fallback file if present
+    df = load_dataset(uploaded if uploaded is not None else None)
+    courses = sorted([c for c in df['course_norm'].dropna().unique()]) if 'course_norm' in df.columns else []
+    diets = sorted([d for d in df['diet_norm'].dropna().unique()]) if 'diet_norm' in df.columns else []
     col_c1, col_c2 = st.columns(2)
     with col_c1:
         selected_course = st.selectbox("Course", options=["Any"] + courses, index=0)
     with col_c2:
         selected_diet = st.selectbox("Diet", options=["Any"] + diets, index=0)
-    # Time filters
+    # Time filters with safe defaults
     min_prep = int(df['prep_time'].dropna().min()) if df['prep_time'].dropna().size else 0
     max_prep_avail = int(df['prep_time'].dropna().max()) if df['prep_time'].dropna().size else 120
     min_cook = int(df['cook_time'].dropna().min()) if df['cook_time'].dropna().size else 0
@@ -338,19 +301,16 @@ if find_btn:
         max_cook_allowed = st.number_input("Max cook time (minutes)", min_value=0, max_value=max(1440, max_cook_avail), value=max(60, min_cook))
     st.markdown("---")
 
-    # Filter dataset by course/diet/time
     filtered = df.copy()
     if selected_course != "Any":
         filtered = filtered[filtered['course_norm'].str.lower() == selected_course.lower()]
     if selected_diet != "Any":
         filtered = filtered[filtered['diet_norm'].str.lower() == selected_diet.lower()]
 
-    # time filtering (coerce nan as large number)
     filtered = filtered[(filtered['prep_time'].fillna(99999) <= float(max_prep_allowed)) & (filtered['cook_time'].fillna(99999) <= float(max_cook_allowed))]
     if filtered.empty:
         st.info("No recipes match your course/diet/time filters. Try relaxing some constraints.")
     else:
-        # Score recipes
         results = []
         for _, row in filtered.iterrows():
             ingredients = row.get('parsed_ingredients', []) or []
@@ -370,7 +330,6 @@ if find_btn:
                 "estimated_missing_cost": est_cost,
                 "instructions": row.get('instructions', '')
             })
-        # Apply post-filters: only fully makeable, min coverage, max_missing
         results_df = pd.DataFrame(results)
         if only_fully_makeable:
             results_df = results_df[results_df['missing_count'] == 0]
@@ -381,11 +340,9 @@ if find_btn:
         if results_df.empty:
             st.info("No recommendations after applying matching filters. Try lowering min coverage, increasing max missing, or relaxing times.")
         else:
-            # Sort: fewest missing, highest coverage, then shortest time
             results_df = results_df.copy()
             results_df['total_time'] = results_df['prep_time'].fillna(0) + results_df['cook_time'].fillna(0)
-            results_df.sort_values(by=['missing_count', '-coverage'] if False else ['missing_count', 'total_time', 'coverage'], inplace=True)
-            # Provide score column for display (coverage*100 - missing penalty)
+            results_df.sort_values(by=['missing_count', 'total_time', 'coverage'], inplace=True)
             results_df['score'] = results_df.apply(lambda r: round(r['coverage']*100 - r['missing_count']*5, 1), axis=1)
             top_n = st.number_input("How many top recipes to show", min_value=1, max_value=50, value=6, step=1)
             selected_results = results_df.head(int(top_n)).to_dict(orient='records')
@@ -401,9 +358,7 @@ if find_btn:
                     st.write(meta)
                     st.write(times)
                     st.write(f"Missing ingredients: **{r['missing_count']}**  •  Coverage: **{int(r['coverage']*100)}%**  •  Est. missing cost: **${r['estimated_missing_cost']}**")
-                    # ingredient chips
                     chips_html = ""
-                    user_keys = set(pantry.keys())
                     for ing in r.get('ingredients', []):
                         cls = "ingredient-have" if ingredient_present(ing, pantry, fuzz_threshold=fuzz_threshold) else "ingredient-miss"
                         human = ing.title()
@@ -414,18 +369,15 @@ if find_btn:
                         st.info(r['description'])
                     if r.get('instructions'):
                         with st.expander("Show instructions"):
-                            # split into steps reasonably
                             steps = re.split(r'(?<=[\.\?\!])\s+', r['instructions'])
                             for idx_step, step in enumerate(steps, 1):
                                 if step.strip():
                                     st.write(f"{idx_step}. {step.strip()}")
-                    # Add to wishlist button
                     if st.button(f"Add '{r['name']}' to wishlist", key=f"wish_{i}"):
                         if "wishlist" not in st.session_state:
                             st.session_state.wishlist = []
                         st.session_state.wishlist.append(r)
                         st.success("Added to wishlist (missing ingredients aggregated in sidebar).")
-            # end results display
 
 # ---- Sidebar wishlist display & download ----
 st.sidebar.markdown("---")
@@ -435,7 +387,6 @@ if "wishlist" in st.session_state and st.session_state.wishlist:
     agg = aggregate_wishlist(st.session_state.wishlist, price_map)
     wdf = pd.DataFrame(agg)
     st.sidebar.table(wdf if not wdf.empty else pd.DataFrame([{"item":"(empty)","count":0}]))
-    # CSV download
     csv_buf = io.StringIO()
     if not wdf.empty:
         wdf.to_csv(csv_buf, index=False)
