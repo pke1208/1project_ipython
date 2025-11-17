@@ -224,7 +224,7 @@ def parse_minutes(s: Any) -> float:
     return float('nan')
 
 @st.cache_data(ttl=300)
-def load_dataset(fallback_path: str = "food_recipessample.csv") -> pd.DataFrame:
+def load_dataset(fallback_path: str = "food_recipes.csv") -> pd.DataFrame:
     if os.path.exists(fallback_path):
         try:
             df = load_recipes_from_path(fallback_path)
