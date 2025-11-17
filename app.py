@@ -224,7 +224,7 @@ def parse_minutes(s: Any) -> float:
     return float('nan')
 
 @st.cache_data(ttl=300)
-def load_dataset(fallback_path: str = "food_recipes.csv") -> pd.DataFrame:
+def load_dataset(fallback_path: str = "food_recipessample.csv") -> pd.DataFrame:
     if os.path.exists(fallback_path):
         try:
             df = load_recipes_from_path(fallback_path)
@@ -280,15 +280,22 @@ with st.sidebar:
     pantry = parse_pantry_text(ing_text)
     st.write(f"Detected pantry items: {', '.join(sorted(pantry.keys()))}" if pantry else "No pantry items parsed yet.")
     st.markdown("---")
-    st.markdown("Filter & matching options")
-    fuzz_threshold = st.slider("Fuzzy matching sensitivity (higher = stricter)", 60, 100, 80)
-    min_coverage = st.slider("Minimum recipe ingredient coverage required (%)", 0, 100, 0)
-    only_fully_makeable = st.checkbox("Show only recipes with no missing ingredients", value=False)
-    max_missing = st.number_input("Max missing ingredients allowed (set 0 to disable)", min_value=0, max_value=50, value=10, step=1)
-    st.markdown("---")
-    st.subheader("Optional: Prices for wishlist estimates")
-    st.text_area("Enter per-item price lines (item:price)", value="eggs:0.3\ntomato:0.6\nchicken breast:3.0", height=100, key="price_map_text")
-    st.markdown("---")
+
+    # Removed "Filter & matching options" UI per request.
+    # Set defaults so behavior remains consistent.
+    # fuzz_threshold slider removed -> default value:
+    # min_coverage slider removed -> default 0
+    # only_fully_makeable checkbox removed -> default False
+    # max_missing number_input removed -> default 10
+    # Also removed the "Optional: Prices for wishlist estimates" text area UI.
+
+    # Default matching/filtering values (previous defaults preserved)
+    # These are here so subsequent logic that references them continues to work.
+    fuzz_threshold = 80
+    min_coverage = 0
+    only_fully_makeable = False
+    max_missing = 10
+
     st.write("When ready, click:")
     find_btn = st.button("🔍 Find Best Recipes", type="primary")
     st.markdown("---")
@@ -331,7 +338,7 @@ if find_btn:
         st.info("No recipes match your course/diet/time filters. Try relaxing some constraints.")
     else:
         results = []
-        price_map = parse_price_map(st.session_state.get("price_map_text", ""))
+        price_map = parse_price_map(st.session_state.get("price_map_text", ""))  # text input removed; key will default to ""
         for _, row in filtered.iterrows():
             ingredients = row.get('parsed_ingredients', []) or []
             missing_count, missing_list, coverage = score_recipe(ingredients, pantry, fuzz_threshold=fuzz_threshold)
